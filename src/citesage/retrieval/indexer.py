@@ -55,8 +55,7 @@ def load_chunk_records(chunks_path: Path) -> list[IndexRecord]:
             paper_id = str(raw.get("paper_id") or "unknown")
             metadata = {
                 "paper_id": paper_id,
-                "title": str(raw.get("title") or paper_id),
-                "section": str(raw.get("section") or "unknown"),
+                "title": str(raw.get("title") or raw.get("paper_title") or paper_id),                "section": str(raw.get("section") or "unknown"),
                 "page_start": _safe_int(raw.get("page_start"), 0),
                 "page_end": _safe_int(raw.get("page_end"), 0),
             }

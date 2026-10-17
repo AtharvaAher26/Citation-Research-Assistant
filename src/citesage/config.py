@@ -1,3 +1,5 @@
+"""Central configuration for CitationSage."""
+
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
@@ -21,10 +23,19 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    # --- Phase 1C: generation layer ---
+    groq_api_key: str = ""
+    gemini_api_key: str = ""
+    groq_model: str = "llama-3.1-8b-instant"
+    gemini_model: str = "gemini-2.5-flash"
+    llm_timeout_seconds: float = 30.0
+    llm_max_output_tokens: int = 1024
+
     model_config = {"env_prefix": "CITESAGE_", "env_file": ".env", "extra": "ignore"}
 
 
 settings = Settings()
+
 RAW_DIR = settings.data_dir / "raw"
 INTERIM_DIR = settings.data_dir / "interim"
 PROCESSED_DIR = settings.data_dir / "processed"

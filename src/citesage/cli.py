@@ -14,6 +14,7 @@ from citesage.fetch.storage import PaperStore
 from citesage.logging_conf import setup_logging
 from citesage.processing.chunker import chunk_paper
 from citesage.processing.extractor import ExtractionError, extract_pdf
+from citesage.generation.llm import LLMError, build_clients, generate_with_fallback
 
 app = typer.Typer(
     add_completion=False,
@@ -167,6 +168,80 @@ def search(
         typer.echo(f"    {hit.citation}")
         snippet = " ".join(hit.text.split())[:300]
         typer.echo(f"    {snippet}{'...' if len(hit.text) > 300 else ''}")
+
+@app.command()
+def ask(
+    question: str = typer.Argument(..., help="Your research question"),
+    top_k: int = typer.Option(5, "--top-k", help="Evidence chunks to retrieve"),
+    mode: str = typer.Option("hybrid", "--mode", help="hybrid | dense | sparse"),
+    provider: str = typer.Option("auto", "--provider", help="auto | groq | gemini"),
+    index_dir: Path = typer.Option(Path("data/index"), "--index-dir"),
+) -> None:
+    """Answer a question strictly from the indexed papers, with resolved citations."""
+    if mode not in {"hybrid", "dense", "sparse"}:
+        typer.echo(f"Unknown mode '{mode}' (use hybrid | dense | sparse)")
+        raise typer.Exit(code=2)
+    if not (index_dir / "bm25.json").exists():
+        typer.echo(f"No index found in {index_dir}. Run:  citesage index")
+        raise typer.Exit(code=1)
+
+    from citesage.config import Settings  # local imports: heavy deps only when used
+    from citesage.generation.answerer import ask as ask_question
+    from citesage.generation.llm import AllProvidersFailedError, LLMConfigError, build_clients
+    from citesage.retrieval.embedder import Embedder
+    from citesage.retrieval.hybrid import HybridRetriever
+    from citesage.retrieval.keyword_index import BM25Index
+    from citesage.retrieval.vector_store import VectorStore
+
+    settings = Settings()
+    try:
+        clients = build_clients(
+            groq_api_key=settings.groq_api_key,
+            gemini_api_key=settings.gemini_api_key,
+            groq_model=settings.groq_model,
+            gemini_model=settings.gemini_model,
+            provider=provider,
+            timeout_seconds=settings.llm_timeout_seconds,
+            max_output_tokens=settings.llm_max_output_tokens,
+        )
+    except LLMConfigError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1)
+
+    vector_store = VectorStore(index_dir)
+    bm25 = BM25Index.load(index_dir / "bm25.json")
+    retriever = HybridRetriever(vector_store=vector_store, bm25_index=bm25, embedder=Embedder())
+    evidence = retriever.search(question, top_k=top_k, mode=mode)
+    if not evidence:
+        typer.echo("No evidence retrieved - try different wording or index more papers.")
+        return
+
+    try:
+        answer = ask_question(question, evidence, clients)
+    except AllProvidersFailedError as exc:
+        typer.echo(f"LLM providers unavailable: {exc}")
+        typer.echo("Check the keys in .env, your quota, or your connection, then retry.")
+        raise typer.Exit(code=1)
+    except LLMError as exc:
+        typer.echo(f"Generation failed: {exc}")
+        raise typer.Exit(code=1)
+
+    typer.echo("")
+    if answer.refused:
+        typer.echo("NO SUPPORTING EVIDENCE in the indexed papers for this question.")
+        typer.echo(f"Detail: {answer.text}")
+        typer.echo(f"(provider: {answer.provider})")
+        return
+
+    typer.echo("ANSWER:")
+    typer.echo(answer.text)
+    typer.echo("")
+    typer.echo("SOURCES:")
+    for citation in answer.citations:
+        typer.echo(f"  {citation.reference}")
+    if answer.warning:
+        typer.echo(f"  warning: {answer.warning}")
+    typer.echo(f"\n(answered by {answer.provider})")
 
 if __name__ == "__main__":
     app()
