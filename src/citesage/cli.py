@@ -112,6 +112,62 @@ def pipeline(topic: str, max_papers: int = typer.Option(5)):
     chunk()
 
 
+@app.command()
+def index(
+    chunks: Path = typer.Option(Path("data/processed/chunks.jsonl"), "--chunks", help="chunks.jsonl produced by 'citesage chunk'"),
+    index_dir: Path = typer.Option(Path("data/index"), "--index-dir", help="Where the dense + sparse indexes live"),
+) -> None:
+    """Build retrieval indexes: dense (Chroma) + sparse (BM25)."""
+    if not chunks.exists():
+        typer.echo(f"chunks file not found: {chunks}")
+        typer.echo("Run 'citesage chunk' first (or 'citesage pipeline').")
+        raise typer.Exit(code=1)
+    typer.echo("Building indexes (first run downloads the MiniLM model, ~90 MB)...")
+    from citesage.retrieval.indexer import build_indexes  # local import: heavy deps only here
+
+    stats = build_indexes(chunks_path=chunks, index_dir=index_dir)
+    typer.echo(
+        f"Indexed {stats['chunks']} chunks -> {index_dir}\n"
+        f"  dense  (Chroma): {stats['dense_count']} vectors, dim {stats['dim']}\n"
+        f"  sparse (BM25):   {stats['sparse_count']} docs"
+    )
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Natural-language question"),
+    top_k: int = typer.Option(5, "--top-k", help="Number of chunks to return"),
+    mode: str = typer.Option("hybrid", "--mode", help="hybrid | dense | sparse"),
+    index_dir: Path = typer.Option(Path("data/index"), "--index-dir"),
+) -> None:
+    """Search the index and print ranked chunks with citation info."""
+    if mode not in {"hybrid", "dense", "sparse"}:
+        typer.echo(f"Unknown mode '{mode}' (use hybrid | dense | sparse)")
+        raise typer.Exit(code=2)
+    if not (index_dir / "bm25.json").exists():
+        typer.echo(f"No index found in {index_dir}. Run:  citesage index")
+        raise typer.Exit(code=1)
+    from citesage.retrieval.embedder import Embedder  # local imports: heavy deps only here
+    from citesage.retrieval.hybrid import HybridRetriever
+    from citesage.retrieval.keyword_index import BM25Index
+    from citesage.retrieval.vector_store import VectorStore
+
+    vector_store = VectorStore(index_dir)
+    bm25 = BM25Index.load(index_dir / "bm25.json")
+    retriever = HybridRetriever(vector_store=vector_store, bm25_index=bm25, embedder=Embedder())
+    results = retriever.search(query, top_k=top_k, mode=mode)
+    if not results:
+        typer.echo("No results.")
+        return
+    typer.echo(f"\n{len(results)} result(s) for: {query}")
+    for position, hit in enumerate(results, start=1):
+        typer.echo(
+            f"\n[{position}] score={hit.score:.4f}  dense#{hit.dense_rank or '-'}  sparse#{hit.sparse_rank or '-'}"
+        )
+        typer.echo(f"    {hit.citation}")
+        snippet = " ".join(hit.text.split())[:300]
+        typer.echo(f"    {snippet}{'...' if len(hit.text) > 300 else ''}")
+
 if __name__ == "__main__":
     app()
 
